@@ -1,0 +1,26 @@
+name: macos
+
+on:
+  push:
+    branches:
+      - '*'
+    tags-ignore:
+      - '*'
+  pull_request:
+
+jobs:
+  perl:
+
+    runs-on: macOS-latest
+
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Perl
+        run: brew install perl
+      - name: perl -V
+        run: perl -V
+      - name: Install Dependencies
+        run: curl -sL https://git.io/cpm | perl - install -g --show-build-log-on-failure HTTP::Tiny Path::Tiny Archive::Extract strictures Data::Dump IO::Socket::SSL Net::SSLeay FFI::ExtractSymbols FFI::CheckLib App::dumpbin
+      - name: Run Tests
+        #run: prove -l t
+        run: perl sdl_libs.pl

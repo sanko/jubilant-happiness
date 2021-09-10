@@ -1,0 +1,4 @@
+sdl2dll/
+sdl_libs/
+sdl_output/
+*.old
