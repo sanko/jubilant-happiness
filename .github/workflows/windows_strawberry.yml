@@ -1,4 +1,4 @@
-name: windows
+name: windows (Strawberry Perl)
 
 on:
     push:
@@ -13,7 +13,7 @@ jobs:
       matrix:
         runner: [windows-latest]
         perl: [ '5.30', '5.32', 'latest' ]
-        dist: [ 'default' ]
+        dist: [ 'strawberry' ]
 
     runs-on: ${{matrix.runner}}
     name: Perl ${{matrix.perl}} (${{ matrix.dist }})
