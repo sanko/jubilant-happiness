@@ -370,6 +370,7 @@ warn buildDLLs($^O);
 use Data::Dump;
 ddx build_thread_wrapper();
 if ( $^O eq 'MSWin32' ) {
+`tree /f`;
     eval 'use Win32::API';
     warn $sharedir->child( 'bin', 'SDL2_ttf.dll' )->absolute->stringify;
 	my $function
