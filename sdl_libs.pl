@@ -374,7 +374,7 @@ warn `tree /f`;
     eval 'use Win32::API';
     warn $sharedir->child( 'bin', 'SDL2_ttf.dll' )->absolute->stringify;
 	my $function
-        = Win32::API::More->new( $sharedir->child( 'bin', 'SDL2_ttf.dll' )->absolute->stringify,
+        = Win32::API::More->new( $sharedir->child( 'bin', 'SDL2_ttf.dll' )->absolute->stringify()
         , 'int TTF_Init( )' );
     die "Error: " . ( Win32::FormatMessage( Win32::GetLastError() ) ) if !$function;
     use Data::Dump;
