@@ -326,7 +326,6 @@ int window( const char * title ) {
   return 0;
 }
 END
-
     use FFI::Build;
     my $build = FFI::Build->new(
         'thread_wrapper',
@@ -341,12 +340,12 @@ END
 
     # $lib is an instance of FFI::Build::File::Library
     my $lib = $build->build;
-    #my $ffi = FFI::Platypus->new( api => 1 );
 
+    #my $ffi = FFI::Platypus->new( api => 1 );
     # The filename will be platform dependant, but something like libfrooble.so or frooble.dll
     #$ffi->lib( $lib->path );
-	warn $lib;
-	return $lib;
+    warn $lib;
+    return $lib;
 
 =cut
     my $b = ExtUtils::CBuilder->new();
@@ -370,3 +369,14 @@ END
 warn buildDLLs($^O);
 use Data::Dump;
 ddx build_thread_wrapper();
+if ( $^O eq 'MSWin32' ) {
+    eval 'use Win32::API';
+    warn $sharedir->child( 'bin', 'SDL2_ttf.dll' )->absolute->stringify;
+	my $function
+        = Win32::API::More->new( $sharedir->child( 'bin', 'SDL2_ttf.dll' )->absolute->stringify,
+        , 'int TTF_Init( )' );
+    die "Error: " . ( Win32::FormatMessage( Win32::GetLastError() ) ) if !$function;
+    use Data::Dump;
+    ddx $function;
+    ddx $function->Call();
+}

@@ -33,7 +33,8 @@ jobs:
     - name: perl -V
       run: perl -V
     - name: Install Dependencies
-      run: curl -L https://cpanmin.us | perl - App::cpanminus -v -n HTTP::Tiny Path::Tiny Archive::Extract strictures Data::Dump IO::Socket::SSL Net::SSLeay App::dumpbin FFI::ExtractSymbols FFI::CheckLib Module::Build::Tiny Alien::gmake Archive::Extract Carp::Always Alien::gmake FFI::Build
+      run: curl -L https://cpanmin.us | perl - App::cpanminus -v -n HTTP::Tiny Path::Tiny Archive::Extract strictures Data::Dump IO::Socket::SSL Net::SSLeay App::dumpbin FFI::ExtractSymbols FFI::CheckLib Module::Build::Tiny Alien::gmake Archive::Extract Carp::Always Alien::gmake FFI::Build Win32::API
+
     - name: Run Tests
      #run: prove -l t
       run: perl sdl_libs.pl
