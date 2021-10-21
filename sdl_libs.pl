@@ -1,3 +1,209 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+
+#use C::DynaLib qw(DeclareSub PTR_TYPE);
+use DynaLoader;
+use Config;
+use Carp::Always;
+use Data::Dump;
+$|++;
+
+sub DeclareXSub {
+    my %FARPROC;
+    $FARPROC{namespace} = $_[0];
+    $FARPROC{lib}       = DynaLoader::dl_load_file( ( split( "!", $_[1] ) )[0] ) if $_[1] =~ m/\!/;
+    $FARPROC{procptr}
+        = defined( $FARPROC{lib} ) ?
+        DynaLoader::dl_find_symbol( $FARPROC{lib}, ( split( "!", $_[1] ) )[1] ) :
+        $_[1];
+    return if !defined( $FARPROC{procptr} );
+    $FARPROC{args} = $_[2];
+    $FARPROC{rtn}  = $_[3] // '';
+    if ( $^O =~ /win32/i ) {
+        $FARPROC{conv}
+            = defined( $_[4] ) ? $_[4] : "s";    # default calling convention: Win32  __stdcall
+    }
+    else {
+        $FARPROC{conv}
+            = defined( $_[4] ) ? $_[4] : "c";    # default calling convention: UNIX   __cdecl
+    }
+    my $stackIN = '';
+    my @stridx;
+    my @bytype;
+    my $bytspushed = 0;
+    my $asmcode = "\x90";     # machine code starts , this can also be \xcc -user breakpoint
+    my @Args    = split( ",", $FARPROC{args} );
+    @Args = reverse @Args;    # pushing order last args first
+
+    foreach my $arg (@Args) {
+        $stackIN .= "\x68" . pack( "I", 0 );    # 4 byte push
+        $stackIN .= "\x68" . pack( "I", 0 )
+            if ( $arg =~ m/d|q/i );             # another 4 byte push for doubles,quads
+        push( @stridx, length($stackIN) - 4 + 1 ) if $arg !~ m/d|q/i;
+        push( @stridx, length($stackIN) - 9 + 1 ) if $arg =~ m/d|q/i;
+        push( @bytype, "byval" )                  if $arg =~ m/v|l|i|c|d|q/i;
+        push( @bytype, "byref" )                  if $arg =~ m/p|r/i;           # 32 bit pointers
+        $bytspushed += 4;                           # 4 byte aligned
+        $bytspushed += 4 if ( $arg =~ m/d|q/i );    # another 4 for doubles or quads
+    }
+    $FARPROC{sindex}   = \@stridx;
+    $FARPROC{types}    = \@bytype;
+    $FARPROC{stklen}   = $bytspushed;
+    $FARPROC{edi}      = "null";                       # 4 bytes long !!! ,how convenient
+    $FARPROC{esi}      = "null";
+    $FARPROC{RetEAX}   = "null";                       # usual return register
+    $FARPROC{RetEDX}   = "null";
+    $FARPROC{Ret64bit} = "nullnull";                   # save double or quad returns
+    $FARPROC{stackOUT} = "\x00" x $bytspushed;
+    $asmcode .= "$stackIN";
+    $asmcode .= "\xb8" . CInt( $FARPROC{procptr} );    # mov eax, $procptr
+    $asmcode .= "\xFF\xd0";                            # call eax  => CALL THE PROCEDURE
+
+    # --- save return values info into Perl Strings, including the stack:
+    # - some calls return values back to the stack, overwriting the original args
+    $asmcode .= "\xdd\x1d" . CPtr( $FARPROC{Ret64bit} )
+        if $FARPROC{rtn} =~ m/d/i;    # fstp qword [$FARPROC{Ret64bit}]
+    $asmcode .= "\xa3" . CPtr( $FARPROC{RetEAX} );                  # mov [$FARPROC{RetEAX}], eax
+    $asmcode .= "\x89\x15" . CPtr( $FARPROC{RetEDX} );              # mov [$FARPROC{RetEDX}], edx
+    $asmcode .= "\x89\x35" . CPtr( $FARPROC{esi} );                 # mov [$FARPROC{esi}], esi
+    $asmcode .= "\x89\x3d" . CPtr( $FARPROC{edi} );                 # mov [$FARPROC{edi}], edi
+    $asmcode .= "\x8d\xb4\x24"       if $FARPROC{conv} =~ m/s/i;    #
+    $asmcode .= CInt( -$bytspushed ) if $FARPROC{conv} =~ m/s/i;    # lea   esi,[esp-$bytspushed]
+    $asmcode .= "\x89\xe6"           if $FARPROC{conv} =~ m/c/i;    # mov   esi,esp
+    $asmcode .= "\xbf" . CPtr( $FARPROC{stackOUT} );    # mov edi, [$FARPROC{stackOUT}]
+    $asmcode .= "\xb9" . CInt($bytspushed);             # mov ecx,$bytspushed
+    $asmcode .= "\xfc";                                 # cld
+    $asmcode .= "\xf3\xa4";                             # rep movsb [edi],[esi] => copy the stack
+    $asmcode .= "\x8b\x3d" . CPtr( $FARPROC{edi} );     # mov edi,[$FARPROC{edi}]
+    $asmcode .= "\x8b\x35" . CPtr( $FARPROC{esi} );     # mov esi,[$FARPROC{esi}]
+    $asmcode .= "\x81\xc4" . CInt($bytspushed)
+        if $FARPROC{conv} =~ m/c/i;                     # add esp,$bytspushed : __cdecl
+    $asmcode .= "\xc3";                                 # ret  __stdcall or __cdecl
+    $FARPROC{ASM} = $asmcode;
+    $FARPROC{coderef}
+        = DynaLoader::dl_install_xsub( $FARPROC{namespace}, SVPtr( $FARPROC{ASM} ), __FILE__ );
+    $FARPROC{Call} = sub {
+        my @templates = reverse split( ",", $FARPROC{args} );
+        my @args      = reverse @_;                             # parameters get pushed last first;
+
+        # --- edit the machine language pushes with @args ---
+        for ( my $index = 0; $index < scalar( @{ $FARPROC{sindex} } ); ++$index ) {
+            my @a = split( ":", $args[$index] ) if $args[$index] =~ m/\:/;
+            if ( $templates[$index] eq "ss" ) { $args[$index] = $a[0] << 16 + $a[1]; }
+            if ( $templates[$index] eq "cccc" ) {
+                $args[$index] = $a[0] << 24 + $a[1] << 16 + $a[2] << 8 + $a[3];
+            }
+            if ( $templates[$index] eq "ccc" ) { $args[$index] = $a[0] << 16 + $a[1] << 8 + $a[2]; }
+            if ( $templates[$index] eq "cc" )  { $args[$index] = $a[0] << 8 + $a[1]; }
+            if ( $templates[$index] eq "scc" ) { $args[$index] = $a[0] << 16 + $a[1] << 8 + $a[2]; }
+            if ( $templates[$index] eq "ccs" ) {
+                $args[$index] = $a[0] << 24 + $a[1] << 16 + $a[2];
+            }
+            if ( $templates[$index] eq "sc" ) { $args[$index] = $a[0] << 16 + $a[1]; }
+            if ( $templates[$index] eq "cs" ) { $args[$index] = $a[0] << 16 + $a[1]; }
+            if ( $templates[$index] =~ m/d|q/i ) {
+                $args[$index] = pack( "d", $args[$index] ) if $templates[$index] =~ m/d/i;
+                my $Quad = $args[$index] if $templates[$index] =~ m/q/i;
+                substr(
+                    $FARPROC{ASM}, $FARPROC{sindex}->[$index] + 5,
+                    4,             substr( $args[$index], 0, 4 )
+                ) if $templates[$index] =~ m/d/i;
+                substr( $FARPROC{ASM}, $FARPROC{sindex}->[$index],
+                    4, substr( $args[$index], 4, 4 ) )
+                    if $templates[$index] =~ m/d/i;
+                substr( $FARPROC{ASM}, $FARPROC{sindex}->[$index] + 5, 4, substr( $Quad, 0, 4 ) )
+                    if $templates[$index] =~ m/q/i;
+                substr( $FARPROC{ASM}, $FARPROC{sindex}->[$index], 4, substr( $Quad, 4, 4 ) )
+                    if $templates[$index] =~ m/q/i;
+            }
+            else {
+                substr( $FARPROC{ASM}, $FARPROC{sindex}->[$index], 4, CInt( $args[$index] ) )
+                    if $FARPROC{types}->[$index] eq "byval";
+            }
+            substr( $FARPROC{ASM}, $FARPROC{sindex}->[$index], 4, CPtr( $args[$index] ) )
+                if $FARPROC{types}->[$index] eq "byref";
+        }
+        my $ret = &{ $FARPROC{coderef} };    # Invoke it
+        return $ret;    # usually EAX==return value - not as reliabe as $FARPROC{RetEAX}
+    };
+    return \%FARPROC;  # make an object out of a hash( has 1 XSUB, 1 sub, 2 arrays, several scalars)
+}
+
+sub SVPtr {
+    return unpack( "I", pack( "p", $_[0] ) );
+}
+
+sub CInt {
+    return pack( "i", $_[0] );
+}
+
+sub CPtr {
+    return pack( "p", $_[0] );
+}
+#####################################3
+#my ( $call_argv_ref, $get_context_ref, $Tstack_sp_ptr_ref, $ptrptrargs );
+
+use File::Basename;
+
+push @DynaLoader::dl_library_path, dirname($^X) ;  # ActiveState's Win32 perl dll location
+my $perldll;
+($perldll = $Config{libperl}) =~ s/\.lib/\.$Config{so}/i;
+$perldll = DynaLoader::dl_findfile($perldll);
+my $perlAPI =  DynaLoader::dl_load_file($perldll);
+my $call_argv_ref = DynaLoader::dl_find_symbol($perlAPI,"Perl_call_argv");  # embed.h
+my $get_context_ref = DynaLoader::dl_find_symbol($perlAPI,"Perl_get_context");
+my $Tstack_sp_ptr_ref = DynaLoader::dl_find_symbol($perlAPI,"Perl_Istack_sp_ptr"); # perlapi.h
+if (!$Tstack_sp_ptr_ref){$Tstack_sp_ptr_ref = DynaLoader::dl_find_symbol($perlAPI,"Perl_Tstack_sp_ptr");}
+#####
+my$arg1="Assembly";
+my$arg2="Callback",
+my$arg3="To";
+my$arg4="Perl";
+my $ptrptrargs = pack("PPPPI",$arg1,$arg2,$arg3,$arg4,0);
+my $cbname      = __PACKAGE__ . "::" . "asm2perl";
+my $cb_asm2perl = "\x90" .                           #
+    "\x68" .
+    pack( "I", $call_argv_ref ) .    # push [Perl_call_argv()]  PUSH POINTERS TO PERL XS FUNCTIONS
+    "\x68" . pack( "I", $get_context_ref ) .      # push [Perl_get_context()]
+    "\x68" . pack( "I", $Tstack_sp_ptr_ref ) .    # push [Perl_(T|I)stack_sp_ptr()]
+    "\x55" .                                      # push ebp
+    "\x89\xE5" .                                  # mov ebp,esp   use ebp to access XS
+
+    # ----------------- dSP; MACRO starts -------------------
+    "\xff\x55\x08" .    # call dword ptr [ebp+8] => call Perl_get_context()
+    "\x50" .            # push eax
+    "\xff\x55\x04" .    # call dword ptr [ebp+4] => call Perl_Tstack_sp_ptr()
+    "\x59" .            # pop  ecx
+    "\x8B\x00" .        # mov  eax,dword ptr [eax]
+    "\x89\x45\xec" .    # mov  dword ptr [sp],eax  => local copy of SP
+
+    # -------------- perl_call_argv("callbackname",G_DISCARD,char **args) -----
+    "\x68" . pack( "P", $ptrptrargs ) .    # push char **args
+    "\x68\x02\x00\x00\x00" .               # push G_DISCARD
+    "\x68" . pack( "p", $cbname ) .        # push ptr to name of perl subroutine
+    "\xff\x55\x08" .                       # call Perl_get_context()
+    "\x50" .                               # push eax
+    "\xff\x55\x0c" .                       # call perl_call_argv:   call dword ptr [ebp+0x0c]
+    "\x83\xc4\x10" .                       # add esp,10  CDECL call we maintain stack
+    "\x89\xec" .                           # mov esp,ebp
+    "\x5D" .                               # pop ebp
+    "\x83\xc4\x0c" .                       # add esp,0c
+    "\xc3";                                # ret
+print ">>> internal XSUB\'s(ASM routine) call/callback test  <<<\n";
+print "---Perl calls assembly calls back to Perl test:\n";
+warn 0x00000000558d91a0;
+
+my $cbtest = DeclareXSub( __PACKAGE__ . "::cbtest", SVPtr($cb_asm2perl), '' );
+#$cbtest->{Call}();
+cbtest();
+
+sub asm2perl {
+    my $lastcaller = ( caller(1) )[3];
+    print "called from ", $lastcaller . "(\@_ = ", join( " ", @_ ), ")\n";
+}
+
+__END__
 use strict;
 use warnings;
 use experimental 'signatures';
